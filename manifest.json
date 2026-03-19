@@ -1,9 +1,9 @@
 {
 	"id": "anki-flashcards-sync",
 	"name": "Anki Flashcards Sync",
-	"version": "0.0.1",
+	"version": "0.0.3",
 	"minAppVersion": "1.12.4",
-	"description": "Pushes flashcards from Obsidian to Anki. The flashcards are bashed on code blocks annotated with flashcard.",
+	"description": "Pushes flashcards from notes to Anki. The flashcards are bashed on code blocks annotated with flashcard.",
 	"author": "Olof Haglund",
 	"authorUrl": "https://olofhaglund.name",
 	"isDesktopOnly": true
