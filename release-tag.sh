@@ -32,5 +32,5 @@ manifest.version = version;
 fs.writeFileSync(path, JSON.stringify(manifest, null, "\t") + "\n");
 '
 
-git tag "$version"
+git tag -a $version -m "$version"
 echo "git push origin $version"
