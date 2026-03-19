@@ -1,90 +1,145 @@
-# Obsidian Sample Plugin
+# Obsidian Anki
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+**NOTE:** This is an early version and released early to catch hiccups in the distribution flow. 
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+Obsidian plugin that renders `flashcard` code blocks as card previews and syncs them to Anki through AnkiConnect.
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+## What it does
 
-## First time developing plugins?
+- Renders `flashcard` code blocks in Reading view and Live Preview.
+- Loads note type/card template definitions from markdown files in `Anki/`.
+- Uses note frontmatter as card field values.
+- Renders one preview card per card template with a front/back toggle.
+- Replaces `{{Audio}}` in preview with a play button that plays the referenced vault audio file.
+- Syncs flashcards to Anki (create/update) using a deterministic source tag per block.
+- Auto-creates missing decks and missing note types in Anki.
 
-Quick starting guide for new plugin devs:
+## Requirements
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+- Obsidian desktop.
+- [Anki](https://apps.ankiweb.net/) desktop.
+- [AnkiConnect](https://ankiweb.net/shared/info/2055492159) enabled in Anki (default endpoint: `http://127.0.0.1:8765`).
 
-## Releasing new releases
+## Note type definitions (`Anki/` folder)
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
+Create one markdown file per note type under `Anki/`.
+Only frontmatter is used.
 
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
+Example: `Anki/French Sentence.md`
 
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+```md
+---
+name: French Sentence
+cards:
+  - name: With Sound Cue
+    front_template: |
+      {{french}}
+      <br>
+      {{Audio}}
+    back_template: |
+      {{FrontSide}}
+      <hr>
+      {{english}}
+  - name: Without Sound Cue
+    front_template: "{{french}}"
+    back_template: |
+      {{FrontSide}}
+      <br>
+      {{Audio}}
+      <hr>
+      {{english}}
+style: |
+  .card {
+    font-family: Arial;
+    font-size: 20px;
+    text-align: center;
+  }
+---
+# French Sentence
+This text is not read and can be used a comment to the note .
 ```
 
-If you have multiple URLs, you can also do:
+Notes:
+- Quote single-line template values when using `{{...}}` on one line.
+- `style` and `styling` are both accepted.
+- If `fields` is omitted, fields are inferred from template placeholders.
 
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+## Flashcard block format
+
+Put flashcards in normal notes using fenced code blocks:
+
+```flashcard
+deck: French::Sentences
+note_type: French Sentence
+fields:
+- french
+- english
+- Audio
 ```
 
-## API Documentation
+Meaning:
+- `deck`: target Anki deck (`::` supports subdecks).
+- `note_type`: note type name matching `Anki/*.md` `name`.
+- `fields`: frontmatter keys for this note. If omitted, inferred from the note type templates.
 
-See https://docs.obsidian.md
+## Field values from frontmatter
+
+Values are read from the note's frontmatter.
+
+Example note:
+
+```md
+---
+french: Ça va
+english: How are you?
+Audio: [[ca-va.wav]]
+---
+```
+
+`Audio` supports:
+- `[[file.wav]]`
+- `![[file.wav]]`
+- `[label](file.wav)`
+- direct vault path (`French/Sound Files/file.wav`)
+
+## Sync behavior
+
+Command: `Sync flashcards to Anki`
+
+Per flashcard block:
+- Resolves note type from `Anki/*.md`.
+- Validates required fields exist in note frontmatter.
+- Ensures deck exists.
+- Ensures note type exists (creates if missing).
+- Finds existing note by deterministic source tag.
+- Creates or updates note fields and tags.
+
+## Settings
+
+- `AnkiConnect URL`
+- `Default deck`
+- `Default note type`
+- `Default tags`
+- `Auto sync` (currently config only)
+- `Sync scope` (`active-file`, `vault`, `folder`)
+- `Sync folder` (when scope is `folder`)
+
+## Troubleshooting
+
+- `Missing frontmatter key`: add the key to the source note frontmatter or adjust `fields`.
+- Audio button says `Audio not found`: verify the file exists in the vault and link/path is valid.
+- If sync fails, the popup shows the first error and console logs detailed failures.
+
+## Security and privacy
+
+- Preview HTML is sanitized before rendering.
+- Network calls are only made to the configured AnkiConnect URL.
+- Data sent to Anki is limited to resolved card fields, deck/model names, and tags for sync.
+
+## Development
+
+```bash
+npm install
+npm run dev
+npm run build
+```

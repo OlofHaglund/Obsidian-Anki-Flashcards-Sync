@@ -1,8 +1,95 @@
-/*
+.obsidian-anki-flashcard {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	padding: 12px;
+	background: var(--background-primary-alt);
+	margin: 8px 0;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.obsidian-anki-flashcard__header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 10px;
+	font-size: 0.85em;
+}
 
-If your plugin does not need CSS, delete this file.
+.obsidian-anki-flashcard__deck {
+	font-weight: 600;
+}
 
-*/
+.obsidian-anki-flashcard__note-type {
+	color: var(--text-muted);
+}
+
+.obsidian-anki-flashcard__cards {
+	display: grid;
+	gap: 12px;
+}
+
+.obsidian-anki-preview-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-primary);
+	overflow: hidden;
+}
+
+.obsidian-anki-preview-card__toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.obsidian-anki-preview-card__title {
+	font-size: 0.82em;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--text-muted);
+}
+
+.obsidian-anki-preview-card__toggle {
+	font-size: 0.8em;
+	padding: 4px 8px;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	cursor: pointer;
+}
+
+.obsidian-anki-preview-card__host {
+	padding: 12px;
+}
+
+.obsidian-anki-audio-button {
+	font-size: 0.82em;
+	padding: 4px 10px;
+	border-radius: 6px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	cursor: pointer;
+}
+
+.obsidian-anki-warning {
+	border: 1px solid var(--text-error);
+	border-radius: 10px;
+	padding: 10px 12px;
+	background: var(--background-secondary);
+	margin: 8px 0;
+}
+
+.obsidian-anki-warning__title {
+	font-weight: 700;
+	margin-bottom: 6px;
+}
+
+.obsidian-anki-warning__list {
+	margin: 0;
+	padding-left: 20px;
+}
