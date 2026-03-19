@@ -39,6 +39,7 @@ export async function syncFlashcardsFromVault(
 	const files = getScopeFiles(plugin, settings);
 	const noteTypeRegistry = getAnkiNoteTypeRegistry(plugin);
 	const ensuredModels = new Set<string>();
+	const uploadedMedia = new Map<string, string>();
 
 	for (const file of files) {
 		const markdown = await plugin.app.vault.cachedRead(file);
@@ -69,6 +70,13 @@ export async function syncFlashcardsFromVault(
 				summary.skipped += 1;
 				continue;
 			}
+			const syncedFieldValues = await resolveFieldsForSync(
+				plugin,
+				client,
+				fieldResolution.values,
+				file.path,
+				uploadedMedia,
+			);
 
 			const sourceTag = buildSourceTag(file.path, block.blockIndex, parsed.config.note_type.name);
 			const tags = Array.from(new Set([...settings.defaultTags, sourceTag]));
@@ -77,7 +85,7 @@ export async function syncFlashcardsFromVault(
 
 			try {
 				await ensureDeckExists(client, deckName);
-				await ensureModelExists(client, modelName, resolvedNoteType, ensuredModels);
+				await ensureModelUpToDate(client, modelName, resolvedNoteType, ensuredModels);
 
 				const existingIds = await client.request<{query: string}, number[]>("findNotes", {
 					query: `tag:${sourceTag}`,
@@ -88,7 +96,7 @@ export async function syncFlashcardsFromVault(
 						note: {
 							deckName,
 							modelName,
-							fields: fieldResolution.values,
+							fields: syncedFieldValues,
 							tags,
 							options: {
 								allowDuplicate: true,
@@ -107,7 +115,7 @@ export async function syncFlashcardsFromVault(
 				await client.request<{note: unknown}, null>("updateNoteFields", {
 					note: {
 						id: noteId,
-						fields: fieldResolution.values,
+						fields: syncedFieldValues,
 					},
 				});
 
@@ -135,6 +143,184 @@ export async function syncFlashcardsFromVault(
 }
 
 /**
+ * Resolves field values for sync and uploads linked audio to Anki media when needed.
+ */
+async function resolveFieldsForSync(
+	plugin: Plugin,
+	client: AnkiConnectClient,
+	fields: Record<string, string>,
+	sourcePath: string,
+	uploadedMedia: Map<string, string>,
+): Promise<Record<string, string>> {
+	const resolved: Record<string, string> = {};
+	const entries = Object.entries(fields);
+
+	for (const [key, value] of entries) {
+		const mediaFileName = await maybeUploadAudioFieldValue(
+			plugin,
+			client,
+			value,
+			sourcePath,
+			uploadedMedia,
+		);
+		resolved[key] = mediaFileName ? `[sound:${mediaFileName}]` : value;
+	}
+
+	return resolved;
+}
+
+/**
+ * Uploads audio linked in a field value and returns Anki media filename.
+ */
+async function maybeUploadAudioFieldValue(
+	plugin: Plugin,
+	client: AnkiConnectClient,
+	value: string,
+	sourcePath: string,
+	uploadedMedia: Map<string, string>,
+): Promise<string | undefined> {
+	if (containsAnkiSoundToken(value)) {
+		return undefined;
+	}
+
+	const cleaned = normalizeAudioLinkValue(value);
+	if (!cleaned || !isSupportedAudioPath(cleaned)) {
+		return undefined;
+	}
+
+	const audioFile = resolveAudioFile(plugin, cleaned, sourcePath);
+	if (!(audioFile instanceof TFile)) {
+		throw new Error(`Audio file not found: ${value}`);
+	}
+
+	const cachedName = uploadedMedia.get(audioFile.path);
+	if (cachedName) {
+		return cachedName;
+	}
+
+	const binary = await plugin.app.vault.readBinary(audioFile);
+	const mediaName = buildAnkiMediaName(audioFile.path);
+	await client.request<{filename: string; data: string}, null>("storeMediaFile", {
+		filename: mediaName,
+		data: arrayBufferToBase64(binary),
+	});
+
+	uploadedMedia.set(audioFile.path, mediaName);
+	return mediaName;
+}
+
+/**
+ * Resolves a vault file from an audio-like link value.
+ */
+function resolveAudioFile(plugin: Plugin, cleanedValue: string, sourcePath: string): TFile | undefined {
+	const linked = plugin.app.metadataCache.getFirstLinkpathDest(cleanedValue, sourcePath);
+	if (linked instanceof TFile) {
+		return linked;
+	}
+
+	const byPath = plugin.app.vault.getAbstractFileByPath(cleanedValue);
+	if (byPath instanceof TFile) {
+		return byPath;
+	}
+
+	return undefined;
+}
+
+/**
+ * Normalizes wiki-style and markdown-style links to raw path values.
+ */
+function normalizeAudioLinkValue(value: string): string {
+	let normalized = value.trim();
+	if (!normalized) {
+		return "";
+	}
+
+	const wikiMatch = normalized.match(/^!?\[\[([^[\]]+)\]\]$/);
+	if (wikiMatch?.[1]) {
+		const target = wikiMatch[1].split("|")[0];
+		return target ? target.trim() : "";
+	}
+
+	const markdownLinkMatch = normalized.match(/^\[[^\]]*]\((.+?)(?:\s+"[^"]*")?\)$/);
+	if (markdownLinkMatch?.[1]) {
+		return markdownLinkMatch[1].trim();
+	}
+
+	return normalized;
+}
+
+/**
+ * Detects whether a value already contains Anki sound markup.
+ */
+function containsAnkiSoundToken(value: string): boolean {
+	return /\[sound:[^\]]+]/i.test(value);
+}
+
+/**
+ * Accepts known audio file extensions for media upload.
+ */
+function isSupportedAudioPath(path: string): boolean {
+	const extension = path.split(".").pop()?.toLowerCase();
+	if (!extension) {
+		return false;
+	}
+
+	const supported = new Set([
+		"aac",
+		"flac",
+		"m4a",
+		"mp3",
+		"ogg",
+		"opus",
+		"wav",
+		"webm",
+	]);
+
+	return supported.has(extension);
+}
+
+/**
+ * Builds a deterministic media filename to avoid collisions in Anki media.
+ */
+function buildAnkiMediaName(filePath: string): string {
+	const extension = filePath.split(".").pop()?.toLowerCase() ?? "dat";
+	const withNoExt = filePath.replace(/\.[^.]+$/, "");
+	const baseName = withNoExt.split("/").pop() ?? "audio";
+	const safeBase = baseName.replace(/[^A-Za-z0-9._-]/g, "_");
+	const hash = createStableHash(filePath);
+	return `obsidian-anki-${safeBase}-${hash}.${extension}`;
+}
+
+/**
+ * Converts binary payload into base64 for AnkiConnect storeMediaFile.
+ */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	const bytes = new Uint8Array(buffer);
+	const chunkSize = 0x8000;
+	let binary = "";
+
+	for (let index = 0; index < bytes.length; index += chunkSize) {
+		const chunk = bytes.subarray(index, index + chunkSize);
+		binary += String.fromCharCode(...chunk);
+	}
+
+	return btoa(binary);
+}
+
+/**
+ * Small deterministic hash for stable media names.
+ */
+function createStableHash(value: string): string {
+	let hash = 2166136261;
+	for (let index = 0; index < value.length; index += 1) {
+		hash ^= value.charCodeAt(index);
+		hash = Math.imul(hash, 16777619);
+	}
+
+	return (hash >>> 0).toString(16);
+}
+
+/**
  * Ensures target deck exists before add/update.
  */
 async function ensureDeckExists(client: AnkiConnectClient, deckName: string): Promise<void> {
@@ -144,9 +330,9 @@ async function ensureDeckExists(client: AnkiConnectClient, deckName: string): Pr
 }
 
 /**
- * Ensures note type model exists in Anki; creates it from definition when missing.
+ * Ensures note type model exists and syncs its mutable schema when already present.
  */
-async function ensureModelExists(
+async function ensureModelUpToDate(
 	client: AnkiConnectClient,
 	modelName: string,
 	noteType: FlashcardBlockConfig["note_type"],
@@ -158,6 +344,7 @@ async function ensureModelExists(
 
 	const existingModels = await client.request<undefined, string[]>("modelNames");
 	if (existingModels.includes(modelName)) {
+		await updateExistingModel(client, modelName, noteType);
 		ensuredModels.add(modelName);
 		return;
 	}
@@ -178,6 +365,98 @@ async function ensureModelExists(
 	});
 
 	ensuredModels.add(modelName);
+}
+
+/**
+ * Updates mutable model pieces for an existing Anki note type.
+ */
+async function updateExistingModel(
+	client: AnkiConnectClient,
+	modelName: string,
+	noteType: FlashcardBlockConfig["note_type"],
+): Promise<void> {
+	const fields = noteType.fields.length > 0 ? noteType.fields : ["Front", "Back"];
+	await ensureModelFields(client, modelName, fields);
+
+	const templates = buildAnkiCardTemplates(noteType.cards, fields);
+	await updateModelTemplates(client, modelName, templates);
+	await updateModelStyling(client, modelName, noteType.styling);
+}
+
+/**
+ * Adds missing fields to an existing model while preserving existing field order/data.
+ */
+async function ensureModelFields(
+	client: AnkiConnectClient,
+	modelName: string,
+	desiredFields: string[],
+): Promise<void> {
+	const existingFields = await client.request<{modelName: string}, string[]>("modelFieldNames", {
+		modelName,
+	});
+
+	const existing = new Set(existingFields);
+	for (const fieldName of desiredFields) {
+		if (existing.has(fieldName)) {
+			continue;
+		}
+
+		await client.request<{modelName: string; fieldName: string}, null>("modelFieldAdd", {
+			modelName,
+			fieldName,
+		});
+		existing.add(fieldName);
+	}
+}
+
+/**
+ * Updates all card templates for an existing model by name.
+ */
+async function updateModelTemplates(
+	client: AnkiConnectClient,
+	modelName: string,
+	templates: Array<{Name: string; Front: string; Back: string}>,
+): Promise<void> {
+	const byName: Record<string, {Front: string; Back: string}> = {};
+	for (const template of templates) {
+		byName[template.Name] = {
+			Front: template.Front,
+			Back: template.Back,
+		};
+	}
+
+	await client.request<{
+		model: {
+			name: string;
+			templates: Record<string, {Front: string; Back: string}>;
+		};
+	}, null>("updateModelTemplates", {
+		model: {
+			name: modelName,
+			templates: byName,
+		},
+	});
+}
+
+/**
+ * Updates CSS styling for an existing model.
+ */
+async function updateModelStyling(
+	client: AnkiConnectClient,
+	modelName: string,
+	css: string,
+): Promise<void> {
+	await client.request<{
+		model: {
+			name: string;
+			css: string;
+		};
+	}, null>("updateModelStyling", {
+		model: {
+			name: modelName,
+			css,
+		},
+	});
 }
 
 /**
@@ -522,3 +801,18 @@ function hashString(value: string): string {
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Test-only exports for pure helper coverage.
+ */
+export const __syncTestables = {
+	buildAnkiCardTemplates,
+	buildAnkiMediaName,
+	buildSourceTag,
+	containsAnkiSoundToken,
+	createStableHash,
+	extractFlashcardBlocks,
+	isSupportedAudioPath,
+	normalizeAudioLinkValue,
+	resolveNoteTypeDefinition,
+};

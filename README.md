@@ -12,6 +12,7 @@ Obsidian plugin that renders `flashcard` code blocks as card previews and syncs 
 - Renders one preview card per card template with a front/back toggle.
 - Replaces `{{Audio}}` in preview with a play button that plays the referenced vault audio file.
 - Syncs flashcards to Anki (create/update) using a deterministic source tag per block.
+- Uploads linked audio files to Anki media and syncs audio fields as `[sound:...]`.
 - Auto-creates missing decks and missing note types in Anki.
 
 ## Requirements
@@ -101,6 +102,7 @@ Audio: [[ca-va.wav]]
 - `![[file.wav]]`
 - `[label](file.wav)`
 - direct vault path (`French/Sound Files/file.wav`)
+- existing Anki token (`[sound:file.wav]`) is left unchanged
 
 ## Sync behavior
 
@@ -109,6 +111,7 @@ Command: `Sync flashcards to Anki`
 Per flashcard block:
 - Resolves note type from `Anki/*.md`.
 - Validates required fields exist in note frontmatter.
+- Uploads linked audio values (`[[file.wav]]`, `![[file.wav]]`, markdown links, or direct vault path) via AnkiConnect `storeMediaFile`.
 - Ensures deck exists.
 - Ensures note type exists (creates if missing).
 - Finds existing note by deterministic source tag.
