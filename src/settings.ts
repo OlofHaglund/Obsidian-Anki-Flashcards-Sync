@@ -48,8 +48,8 @@ export class ObsidianAnkiSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName("AnkiConnect URL")
-			.setDesc("Local AnkiConnect endpoint used for all sync operations.")
+			.setName("Anki connect endpoint")
+			.setDesc("Local Anki connect endpoint used for sync operations.")
 			.addText((text) => text
 				.setPlaceholder("http://127.0.0.1:8765")
 				.setValue(this.plugin.settings.ankiConnectUrl)
@@ -84,7 +84,7 @@ export class ObsidianAnkiSettingTab extends PluginSettingTab {
 			.setName("Default tags")
 			.setDesc("Comma-separated list of tags to apply when syncing notes.")
 			.addText((text) => text
-				.setPlaceholder("obsidian, flashcard")
+				.setPlaceholder("Obsidian, flashcard")
 				.setValue(this.plugin.settings.defaultTags.join(", "))
 				.onChange(async (value) => {
 					this.plugin.settings.defaultTags = value
@@ -123,7 +123,7 @@ export class ObsidianAnkiSettingTab extends PluginSettingTab {
 				.setName("Sync folder")
 				.setDesc("Vault-relative path used when sync scope is set to folder.")
 				.addText((text) => text
-					.setPlaceholder("Language/French")
+					.setPlaceholder("Language/french")
 					.setValue(this.plugin.settings.syncFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.syncFolder = value.trim();

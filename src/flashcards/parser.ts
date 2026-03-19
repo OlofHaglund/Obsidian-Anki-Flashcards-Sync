@@ -141,9 +141,10 @@ function parseCards(
 		return [];
 	}
 
+	const nodes: unknown[] = value;
 	const cards: FlashcardTemplateConfig[] = [];
-	for (let index = 0; index < value.length; index += 1) {
-		const node = value[index];
+	for (let index = 0; index < nodes.length; index += 1) {
+		const node = nodes[index];
 		if (!isRecord(node)) {
 			errors.push(`${path}[${index}] must be an object.`);
 			continue;

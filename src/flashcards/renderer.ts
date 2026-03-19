@@ -223,9 +223,9 @@ function renderTemplatePreviewCard(
 	const previewHost = cardShell.createDiv({cls: "obsidian-anki-preview-card__host"});
 	const shadowRoot = previewHost.attachShadow({mode: "open"});
 
-	const styleEl = document.createElement("style");
-	styleEl.textContent = `${DEFAULT_NOTE_STYLING}\n${styling}`;
-	shadowRoot.appendChild(styleEl);
+	const styleSheet = new CSSStyleSheet();
+	styleSheet.replaceSync(`${DEFAULT_NOTE_STYLING}\n${styling}`);
+	shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, styleSheet];
 
 	const cardSurface = document.createElement("div");
 	cardSurface.className = "card";
@@ -240,7 +240,7 @@ function renderTemplatePreviewCard(
 		currentSide = side;
 		sideToggle.textContent = side === "front" ? "Show back" : "Show front";
 		const html = side === "front" ? renderedFront : renderedBack;
-		cardSurface.innerHTML = sanitizeTemplateHtml(html);
+		cardSurface.replaceChildren(sanitizeTemplateFragment(html));
 		hydrateAudioTokens(plugin, cardSurface, sourcePath);
 	};
 
@@ -325,21 +325,22 @@ function hydrateAudioTokens(plugin: Plugin, cardSurface: HTMLElement, sourcePath
 /**
  * Sanitizes template HTML before insertion.
  */
-function sanitizeTemplateHtml(rawHtml: string): string {
-	const template = document.createElement("template");
-	template.innerHTML = rawHtml;
+function sanitizeTemplateFragment(rawHtml: string): DocumentFragment {
+	const parser = new DOMParser();
+	const parsed = parser.parseFromString(rawHtml, "text/html");
+	const fragment = document.createDocumentFragment();
 
 	const blockedTags = ["script", "iframe", "object", "embed", "link", "meta"];
 	for (const blockedTag of blockedTags) {
-		const nodes = Array.from(template.content.querySelectorAll(blockedTag));
+		const nodes = Array.from(parsed.body.querySelectorAll(blockedTag));
 		for (const node of nodes) {
 			node.remove();
 		}
 	}
 
-	const allElements = Array.from(template.content.querySelectorAll("*"));
+	const allElements = Array.from(parsed.body.querySelectorAll("*"));
 	for (const element of allElements) {
-		const attributes = Array.from(element.attributes) as Attr[];
+		const attributes = Array.from(element.attributes);
 		for (const attribute of attributes) {
 			const name = attribute.name.toLowerCase();
 			const value = attribute.value.trim().toLowerCase();
@@ -353,7 +354,11 @@ function sanitizeTemplateHtml(rawHtml: string): string {
 		}
 	}
 
-	return template.innerHTML;
+	while (parsed.body.firstChild) {
+		fragment.appendChild(parsed.body.firstChild);
+	}
+
+	return fragment;
 }
 
 /**
@@ -404,7 +409,7 @@ function toFieldText(value: unknown): string {
 	try {
 		return JSON.stringify(value);
 	} catch {
-		return String(value);
+		return "[unserializable value]";
 	}
 }
 
