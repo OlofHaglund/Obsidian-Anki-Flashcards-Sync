@@ -3,17 +3,17 @@
 ## Anki integration hardening
 
 - [X] Update existing note types when templates/style/fields change (not only create-missing).
-- [ ] Add AnkiConnect capability checks for model actions (create/update endpoints).
-- [ ] Add fallback behavior when model-update actions are unavailable.
-- [ ] Add persistent sync state in plugin data (note IDs + content hash) to reduce tag-only reliance.
-- [ ] Define and implement behavior for deck/model renames.
+- [X] Add AnkiConnect capability checks for model actions (create/update endpoints).
+- [X] Add fallback behavior when model-update actions are unavailable.
+- [X] Add persistent sync state in plugin data (note IDs + content hash) to reduce tag-only reliance.
+- [X] Define and implement behavior for deck/model renames.
 
 ## Data and media handling
 
 - [X] Define `Audio` sync behavior for Anki media:
   - [X] copy/upload media to Anki collection when needed
   - [X] write `[sound:filename]` format in fields for Anki notes
-- [ ] Validate outgoing field payload sizes and unsupported value types.
+- [X] Validate outgoing field payload sizes and unsupported value types.
 - [ ] Add clearer skip reasons for missing fields and invalid templates in sync summary.
 
 ## reliability

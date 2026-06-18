@@ -4,6 +4,13 @@ import {parseFlashcardBlock} from "../flashcards/parser";
 import {FlashcardBlockConfig, FlashcardTemplateConfig} from "../flashcards/types";
 import {ObsidianAnkiPluginSettings} from "../settings";
 
+const SYNC_STATE_STORAGE_KEY = "__syncState";
+const SYNC_STATE_VERSION = 1;
+const MAX_MEDIA_FILE_BYTES = 100 * 1024 * 1024;
+const MAX_FIELD_VALUE_BYTES = 1 * 1024 * 1024;
+const MAX_NOTE_FIELD_PAYLOAD_BYTES = 5 * 1024 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+
 /**
  * Summary of sync work performed.
  */
@@ -18,6 +25,42 @@ export interface SyncSummary {
 interface FlashcardBlockMatch {
 	blockIndex: number;
 	source: string;
+}
+
+interface PersistedSyncEntry {
+	noteId: number;
+	contentHash: string;
+	modelName: string;
+	deckName: string;
+	updatedAt: number;
+}
+
+interface PersistedSyncState {
+	version: number;
+	entries: Record<string, PersistedSyncEntry>;
+}
+
+interface AnkiNoteInfo {
+	fields: Record<string, {value: string}>;
+	tags: string[];
+	modelName?: string;
+}
+
+type RenameAction = "none" | "deck" | "model";
+
+type ModelActionName =
+	| "createModel"
+	| "modelFieldNames"
+	| "modelFieldAdd"
+	| "updateModelTemplates"
+	| "updateModelStyling";
+
+interface ModelActionCapabilities {
+	createModel: boolean;
+	modelFieldNames: boolean;
+	modelFieldAdd: boolean;
+	updateModelTemplates: boolean;
+	updateModelStyling: boolean;
 }
 
 /**
@@ -40,6 +83,10 @@ export async function syncFlashcardsFromVault(
 	const noteTypeRegistry = getAnkiNoteTypeRegistry(plugin);
 	const ensuredModels = new Set<string>();
 	const uploadedMedia = new Map<string, string>();
+	const modelCapabilities = await detectModelActionCapabilities(client);
+	const warnedUnsupportedModelActions = new Set<ModelActionName>();
+	const syncState = await loadSyncState(plugin);
+	let syncStateDirty = false;
 
 	for (const file of files) {
 		const markdown = await plugin.app.vault.cachedRead(file);
@@ -70,13 +117,6 @@ export async function syncFlashcardsFromVault(
 				summary.skipped += 1;
 				continue;
 			}
-			const syncedFieldValues = await resolveFieldsForSync(
-				plugin,
-				client,
-				fieldResolution.values,
-				file.path,
-				uploadedMedia,
-			);
 
 			const sourceTag = buildSourceTag(file.path, block.blockIndex, parsed.config.note_type.name);
 			const tags = Array.from(new Set([...settings.defaultTags, sourceTag]));
@@ -84,14 +124,68 @@ export async function syncFlashcardsFromVault(
 			const modelName = resolvedNoteType.name || settings.defaultNoteType;
 
 			try {
+				const syncedFieldValues = await resolveFieldsForSync(
+					plugin,
+					client,
+					fieldResolution.values,
+					file.path,
+					uploadedMedia,
+				);
+				const payloadSizeErrors = validateFieldPayloadSizes(syncedFieldValues);
+				if (payloadSizeErrors.length > 0) {
+					summary.skipped += 1;
+					continue;
+				}
+
+				const contentHash = buildSyncContentHash(
+					deckName,
+					modelName,
+					tags,
+					syncedFieldValues,
+					resolvedNoteType,
+				);
+
 				await ensureDeckExists(client, deckName);
-				await ensureModelUpToDate(client, modelName, resolvedNoteType, ensuredModels);
+				await ensureModelUpToDate(
+							client,
+						modelName,
+						resolvedNoteType,
+						ensuredModels,
+					modelCapabilities,
+					warnedUnsupportedModelActions,
+				);
 
-				const existingIds = await client.request<{query: string}, number[]>("findNotes", {
-					query: `tag:${sourceTag}`,
-				});
+				const persistedEntry = syncState.entries[sourceTag];
+				const persistedNoteId = persistedEntry?.noteId;
+				const hasSyncPayloadChanged = persistedEntry?.contentHash !== contentHash;
+				if (persistedEntry && persistedNoteId !== undefined) {
+					const persistedNoteInfo = await getNoteInfo(client, persistedNoteId);
+					if (persistedNoteInfo && persistedEntry.contentHash === contentHash) {
+						summary.skipped += 1;
+						continue;
+					}
+				}
 
-				if (existingIds.length === 0) {
+				let noteId: number | undefined = persistedNoteId;
+				let noteInfo: AnkiNoteInfo | undefined;
+				if (noteId !== undefined) {
+					noteInfo = await getNoteInfo(client, noteId);
+					if (!noteInfo) {
+						noteId = undefined;
+					}
+				}
+
+				if (noteId === undefined) {
+					const existingIds = await client.request<{query: string}, number[]>("findNotes", {
+						query: `tag:${sourceTag}`,
+					});
+					noteId = existingIds[0];
+					if (noteId !== undefined) {
+						noteInfo = await getNoteInfo(client, noteId);
+					}
+				}
+
+				if (noteId === undefined) {
 					await client.request<{note: unknown}, number>("addNote", {
 						note: {
 							deckName,
@@ -103,27 +197,92 @@ export async function syncFlashcardsFromVault(
 							},
 						},
 					});
+					const createdIds = await client.request<{query: string}, number[]>("findNotes", {
+						query: `tag:${sourceTag}`,
+					});
+					const createdId = createdIds[0];
+					if (createdId !== undefined) {
+						syncState.entries[sourceTag] = {
+							noteId: createdId,
+							contentHash,
+							modelName,
+							deckName,
+							updatedAt: Date.now(),
+						};
+						syncStateDirty = true;
+					}
 					summary.created += 1;
 					continue;
 				}
 
-				const noteId = existingIds[0];
-				if (noteId === undefined) {
+				if (!noteInfo) {
 					summary.failed += 1;
 					continue;
 				}
-				await client.request<{note: unknown}, null>("updateNoteFields", {
-					note: {
-						id: noteId,
-						fields: syncedFieldValues,
-					},
-				});
 
-				await client.request<{notes: number[]; tags: string}, null>("addTags", {
-					notes: [noteId],
-					tags: tags.join(" "),
-				});
+				const renameAction = determineRenameAction(persistedEntry, noteInfo.modelName, deckName, modelName);
+				if (renameAction === "model") {
+					noteId = await recreateNoteForModelChange(
+						client,
+						noteId,
+						deckName,
+						modelName,
+						syncedFieldValues,
+						tags,
+					);
+					noteInfo = await getNoteInfo(client, noteId);
+					if (!noteInfo) {
+						summary.failed += 1;
+						continue;
+					}
+				} else if (renameAction === "deck") {
+					await changeNoteDeck(client, noteId, deckName);
+				}
 
+				const needsFieldUpdate = hasFieldChanges(noteInfo, syncedFieldValues);
+				const missingTags = getMissingTags(noteInfo.tags, tags);
+
+				if (!needsFieldUpdate && missingTags.length === 0) {
+					syncState.entries[sourceTag] = {
+						noteId,
+						contentHash,
+						modelName,
+						deckName,
+						updatedAt: Date.now(),
+					};
+					syncStateDirty = true;
+					if (shouldCountAsUpdated(needsFieldUpdate, missingTags.length, hasSyncPayloadChanged, renameAction)) {
+						summary.updated += 1;
+					} else {
+						summary.skipped += 1;
+					}
+					continue;
+				}
+
+				if (needsFieldUpdate) {
+					await client.request<{note: unknown}, null>("updateNoteFields", {
+						note: {
+							id: noteId,
+							fields: syncedFieldValues,
+						},
+					});
+				}
+
+				if (missingTags.length > 0) {
+					await client.request<{notes: number[]; tags: string}, null>("addTags", {
+						notes: [noteId],
+						tags: missingTags.join(" "),
+					});
+				}
+
+				syncState.entries[sourceTag] = {
+					noteId,
+					contentHash,
+					modelName,
+					deckName,
+					updatedAt: Date.now(),
+				};
+				syncStateDirty = true;
 				summary.updated += 1;
 			} catch (error: unknown) {
 				summary.failed += 1;
@@ -139,7 +298,70 @@ export async function syncFlashcardsFromVault(
 		}
 	}
 
+	if (syncStateDirty) {
+		await saveSyncState(plugin, syncState);
+	}
+
 	return summary;
+}
+
+/**
+ * Loads persisted sync state from plugin data.
+ */
+async function loadSyncState(plugin: Plugin): Promise<PersistedSyncState> {
+	const rawData: unknown = await plugin.loadData();
+	if (!isRecord(rawData)) {
+		return {version: SYNC_STATE_VERSION, entries: {}};
+	}
+
+	const rawState = rawData[SYNC_STATE_STORAGE_KEY];
+	if (!isRecord(rawState)) {
+		return {version: SYNC_STATE_VERSION, entries: {}};
+	}
+
+	const entriesNode = rawState.entries;
+	if (!isRecord(entriesNode)) {
+		return {version: SYNC_STATE_VERSION, entries: {}};
+	}
+
+	const entries: Record<string, PersistedSyncEntry> = {};
+	for (const [sourceTag, entry] of Object.entries(entriesNode)) {
+		if (!isRecord(entry)) {
+			continue;
+		}
+		const noteId = typeof entry.noteId === "number" ? entry.noteId : undefined;
+		const contentHash = typeof entry.contentHash === "string" ? entry.contentHash : "";
+		const modelName = typeof entry.modelName === "string" ? entry.modelName : "";
+		const deckName = typeof entry.deckName === "string" ? entry.deckName : "";
+		const updatedAt = typeof entry.updatedAt === "number" ? entry.updatedAt : 0;
+
+		if (noteId === undefined || !contentHash || !modelName || !deckName) {
+			continue;
+		}
+
+		entries[sourceTag] = {
+			noteId,
+			contentHash,
+			modelName,
+			deckName,
+			updatedAt,
+		};
+	}
+
+	return {
+		version: typeof rawState.version === "number" ? rawState.version : SYNC_STATE_VERSION,
+		entries,
+	};
+}
+
+/**
+ * Persists sync state while preserving existing settings keys.
+ */
+async function saveSyncState(plugin: Plugin, syncState: PersistedSyncState): Promise<void> {
+	const rawData: unknown = await plugin.loadData();
+	const payload = isRecord(rawData) ? {...rawData} : {};
+	payload[SYNC_STATE_STORAGE_KEY] = syncState;
+	await plugin.saveData(payload);
 }
 
 /**
@@ -192,6 +414,10 @@ async function maybeUploadAudioFieldValue(
 	if (!(audioFile instanceof TFile)) {
 		throw new Error(`Audio file not found: ${value}`);
 	}
+	const mediaFileBytes = getFileSizeBytes(audioFile);
+	if (mediaFileBytes !== undefined && mediaFileBytes > MAX_MEDIA_FILE_BYTES) {
+		throw new Error(`Audio file exceeds ${MAX_MEDIA_FILE_BYTES} bytes: ${audioFile.path}`);
+	}
 
 	const cachedName = uploadedMedia.get(audioFile.path);
 	if (cachedName) {
@@ -199,6 +425,9 @@ async function maybeUploadAudioFieldValue(
 	}
 
 	const binary = await plugin.app.vault.readBinary(audioFile);
+	if (binary.byteLength > MAX_MEDIA_FILE_BYTES) {
+		throw new Error(`Audio file exceeds ${MAX_MEDIA_FILE_BYTES} bytes: ${audioFile.path}`);
+	}
 	const mediaName = buildAnkiMediaName(audioFile.path);
 	await client.request<{filename: string; data: string}, null>("storeMediaFile", {
 		filename: mediaName,
@@ -280,6 +509,14 @@ function isSupportedAudioPath(path: string): boolean {
 }
 
 /**
+ * Reads file size in bytes when available.
+ */
+function getFileSizeBytes(file: TFile): number | undefined {
+	const sized = file as TFile & {stat?: {size?: number}};
+	return typeof sized.stat?.size === "number" ? sized.stat.size : undefined;
+}
+
+/**
  * Builds a deterministic media filename to avoid collisions in Anki media.
  */
 function buildAnkiMediaName(filePath: string): string {
@@ -337,6 +574,8 @@ async function ensureModelUpToDate(
 	modelName: string,
 	noteType: FlashcardBlockConfig["note_type"],
 	ensuredModels: Set<string>,
+	modelCapabilities: ModelActionCapabilities,
+	warnedUnsupportedModelActions: Set<ModelActionName>,
 ): Promise<void> {
 	if (ensuredModels.has(modelName)) {
 		return;
@@ -344,7 +583,13 @@ async function ensureModelUpToDate(
 
 	const existingModels = await client.request<undefined, string[]>("modelNames");
 	if (existingModels.includes(modelName)) {
-		await updateExistingModel(client, modelName, noteType);
+		await updateExistingModel(
+			client,
+			modelName,
+			noteType,
+			modelCapabilities,
+			warnedUnsupportedModelActions,
+		);
 		ensuredModels.add(modelName);
 		return;
 	}
@@ -352,7 +597,7 @@ async function ensureModelUpToDate(
 	const fields = noteType.fields.length > 0 ? noteType.fields : ["Front", "Back"];
 	const cardTemplates = buildAnkiCardTemplates(noteType.cards, fields);
 
-	await client.request<{
+	await requestModelAction<{
 		modelName: string;
 		inOrderFields: string[];
 		css: string;
@@ -362,7 +607,7 @@ async function ensureModelUpToDate(
 		inOrderFields: fields,
 		css: noteType.styling,
 		cardTemplates,
-	});
+	}, client, modelCapabilities);
 
 	ensuredModels.add(modelName);
 }
@@ -374,13 +619,27 @@ async function updateExistingModel(
 	client: AnkiConnectClient,
 	modelName: string,
 	noteType: FlashcardBlockConfig["note_type"],
+	modelCapabilities: ModelActionCapabilities,
+	warnedUnsupportedModelActions: Set<ModelActionName>,
 ): Promise<void> {
 	const fields = noteType.fields.length > 0 ? noteType.fields : ["Front", "Back"];
-	await ensureModelFields(client, modelName, fields);
+	await ensureModelFields(client, modelName, fields, modelCapabilities, warnedUnsupportedModelActions);
 
 	const templates = buildAnkiCardTemplates(noteType.cards, fields);
-	await updateModelTemplates(client, modelName, templates);
-	await updateModelStyling(client, modelName, noteType.styling);
+	await updateModelTemplates(
+		client,
+		modelName,
+		templates,
+		modelCapabilities,
+		warnedUnsupportedModelActions,
+	);
+	await updateModelStyling(
+		client,
+		modelName,
+		noteType.styling,
+		modelCapabilities,
+		warnedUnsupportedModelActions,
+	);
 }
 
 /**
@@ -390,10 +649,15 @@ async function ensureModelFields(
 	client: AnkiConnectClient,
 	modelName: string,
 	desiredFields: string[],
+	modelCapabilities: ModelActionCapabilities,
+	warnedUnsupportedModelActions: Set<ModelActionName>,
 ): Promise<void> {
-	const existingFields = await client.request<{modelName: string}, string[]>("modelFieldNames", {
+	const existingFields = await requestModelActionOptional<{modelName: string}, string[]>("modelFieldNames", {
 		modelName,
-	});
+	}, client, modelCapabilities, warnedUnsupportedModelActions);
+	if (!existingFields) {
+		return;
+	}
 
 	const existing = new Set(existingFields);
 	for (const fieldName of desiredFields) {
@@ -401,10 +665,13 @@ async function ensureModelFields(
 			continue;
 		}
 
-		await client.request<{modelName: string; fieldName: string}, null>("modelFieldAdd", {
+		const added = await requestModelActionOptional<{modelName: string; fieldName: string}, null>("modelFieldAdd", {
 			modelName,
 			fieldName,
-		});
+		}, client, modelCapabilities, warnedUnsupportedModelActions);
+		if (added === undefined) {
+			return;
+		}
 		existing.add(fieldName);
 	}
 }
@@ -416,6 +683,8 @@ async function updateModelTemplates(
 	client: AnkiConnectClient,
 	modelName: string,
 	templates: Array<{Name: string; Front: string; Back: string}>,
+	modelCapabilities: ModelActionCapabilities,
+	warnedUnsupportedModelActions: Set<ModelActionName>,
 ): Promise<void> {
 	const byName: Record<string, {Front: string; Back: string}> = {};
 	for (const template of templates) {
@@ -425,7 +694,7 @@ async function updateModelTemplates(
 		};
 	}
 
-	await client.request<{
+	await requestModelActionOptional<{
 		model: {
 			name: string;
 			templates: Record<string, {Front: string; Back: string}>;
@@ -435,7 +704,7 @@ async function updateModelTemplates(
 			name: modelName,
 			templates: byName,
 		},
-	});
+	}, client, modelCapabilities, warnedUnsupportedModelActions);
 }
 
 /**
@@ -445,8 +714,10 @@ async function updateModelStyling(
 	client: AnkiConnectClient,
 	modelName: string,
 	css: string,
+	modelCapabilities: ModelActionCapabilities,
+	warnedUnsupportedModelActions: Set<ModelActionName>,
 ): Promise<void> {
-	await client.request<{
+	await requestModelActionOptional<{
 		model: {
 			name: string;
 			css: string;
@@ -456,7 +727,127 @@ async function updateModelStyling(
 			name: modelName,
 			css,
 		},
-	});
+	}, client, modelCapabilities, warnedUnsupportedModelActions);
+}
+
+/**
+ * Detects whether model-related actions are supported by the connected AnkiConnect instance.
+ */
+async function detectModelActionCapabilities(client: AnkiConnectClient): Promise<ModelActionCapabilities> {
+	await client.request<undefined, number>("version");
+
+	return {
+		createModel: true,
+		modelFieldNames: await probeModelAction(client, "modelFieldNames", {
+			modelName: "__obsidian_anki_probe__",
+		}),
+		modelFieldAdd: await probeModelAction(client, "modelFieldAdd", {
+			modelName: "__obsidian_anki_probe__",
+			fieldName: "__probe_field__",
+		}),
+		updateModelTemplates: await probeModelAction(client, "updateModelTemplates", {
+			model: {
+				name: "__obsidian_anki_probe__",
+				templates: {},
+			},
+		}),
+		updateModelStyling: await probeModelAction(client, "updateModelStyling", {
+			model: {
+				name: "__obsidian_anki_probe__",
+				css: "",
+			},
+		}),
+	};
+}
+
+/**
+ * Probes whether an AnkiConnect action exists without requiring successful semantics.
+ */
+async function probeModelAction<TParams>(
+	client: AnkiConnectClient,
+	action: ModelActionName,
+	params: TParams,
+): Promise<boolean> {
+	try {
+		await client.request<TParams, unknown>(action, params);
+		return true;
+	} catch (error: unknown) {
+		return !isUnsupportedActionError(error);
+	}
+}
+
+/**
+ * Executes model actions with capability gating and clear unsupported-endpoint errors.
+ */
+async function requestModelAction<TParams, TResult>(
+	action: ModelActionName,
+	params: TParams,
+	client: AnkiConnectClient,
+	capabilities: ModelActionCapabilities,
+): Promise<TResult> {
+	if (!capabilities[action]) {
+		throw new Error(`AnkiConnect does not support required action: ${action}`);
+	}
+
+	try {
+		return await client.request<TParams, TResult>(action, params);
+	} catch (error: unknown) {
+		if (isUnsupportedActionError(error)) {
+			capabilities[action] = false;
+			throw new Error(`AnkiConnect does not support required action: ${action}`);
+		}
+		throw error;
+	}
+}
+
+/**
+ * Executes model actions in best-effort mode and falls back when unsupported.
+ */
+async function requestModelActionOptional<TParams, TResult>(
+	action: ModelActionName,
+	params: TParams,
+	client: AnkiConnectClient,
+	capabilities: ModelActionCapabilities,
+	warnedActions: Set<ModelActionName>,
+): Promise<TResult | undefined> {
+	if (!capabilities[action]) {
+		warnUnsupportedModelAction(action, warnedActions);
+		return undefined;
+	}
+
+	try {
+		return await client.request<TParams, TResult>(action, params);
+	} catch (error: unknown) {
+		if (isUnsupportedActionError(error)) {
+			capabilities[action] = false;
+			warnUnsupportedModelAction(action, warnedActions);
+			return undefined;
+		}
+		throw error;
+	}
+}
+
+/**
+ * Identifies unsupported-action errors returned by AnkiConnect.
+ */
+function isUnsupportedActionError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+
+	return /unsupported action|unknown action/i.test(error.message);
+}
+
+/**
+ * Emits one warning per unsupported model action during a sync run.
+ */
+function warnUnsupportedModelAction(action: ModelActionName, warnedActions: Set<ModelActionName>): void {
+	if (warnedActions.has(action)) {
+		return;
+	}
+
+	warnedActions.add(action);
+	console.warn(`[Obsidian Anki] Falling back: AnkiConnect action not supported: ${action}`);
 }
 
 /**
@@ -597,7 +988,12 @@ function resolveFieldValues(
 			errors.push(`Missing frontmatter key: ${key}`);
 			continue;
 		}
-		values[key] = toFieldText(value);
+		const fieldResult = toFieldTextResult(value);
+		if (fieldResult.error) {
+			errors.push(`Unsupported value for key ${key}: ${fieldResult.error}`);
+			continue;
+		}
+		values[key] = fieldResult.text;
 	}
 
 	return {values, errors};
@@ -606,25 +1002,75 @@ function resolveFieldValues(
 /**
  * Converts frontmatter values into stable text for note fields.
  */
-function toFieldText(value: unknown): string {
+function toFieldTextResult(value: unknown): {text: string; error?: undefined} | {text: ""; error: string} {
 	if (typeof value === "string") {
-		return value;
+		return {text: value};
 	}
 	if (typeof value === "number" || typeof value === "boolean") {
-		return String(value);
+		return {text: String(value)};
 	}
 	if (Array.isArray(value)) {
-		return value.map((item) => toFieldText(item)).join(", ");
+		const parts: string[] = [];
+		for (const item of value) {
+			const result = toFieldTextResult(item);
+			if (result.error) {
+				return result;
+			}
+			parts.push(result.text);
+		}
+		return {text: parts.join(", ")};
 	}
 	if (value === null || value === undefined) {
-		return "";
+		return {text: ""};
+	}
+	if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
+		return {text: "", error: `type '${typeof value}' is not supported`};
 	}
 
 	try {
-		return JSON.stringify(value);
+		const serialized = JSON.stringify(value);
+		if (serialized === undefined) {
+			return {text: "", error: "value cannot be serialized"};
+		}
+		return {text: serialized};
 	} catch {
-		return "[unserializable value]";
+		return {text: "", error: "value cannot be serialized"};
 	}
+}
+
+/**
+ * Validates outgoing field payload sizes in bytes.
+ */
+function validateFieldPayloadSizes(
+	fields: Record<string, string>,
+	limits: {maxFieldBytes: number; maxTotalBytes: number} = {
+		maxFieldBytes: MAX_FIELD_VALUE_BYTES,
+		maxTotalBytes: MAX_NOTE_FIELD_PAYLOAD_BYTES,
+	},
+): string[] {
+	const errors: string[] = [];
+	let totalBytes = 0;
+
+	for (const [field, value] of Object.entries(fields)) {
+		const bytes = utf8ByteLength(value);
+		totalBytes += bytes;
+		if (bytes > limits.maxFieldBytes) {
+			errors.push(`Field '${field}' exceeds ${limits.maxFieldBytes} bytes.`);
+		}
+	}
+
+	if (totalBytes > limits.maxTotalBytes) {
+		errors.push(`Total field payload exceeds ${limits.maxTotalBytes} bytes.`);
+	}
+
+	return errors;
+}
+
+/**
+ * Returns UTF-8 byte length of a string.
+ */
+function utf8ByteLength(value: string): number {
+	return UTF8_ENCODER.encode(value).byteLength;
 }
 
 /**
@@ -803,16 +1249,166 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Compares desired fields against current Anki note fields.
+ */
+function hasFieldChanges(noteInfo: AnkiNoteInfo, desiredFields: Record<string, string>): boolean {
+	const entries = Object.entries(desiredFields);
+	for (const [field, desiredValue] of entries) {
+		const currentValue = noteInfo.fields[field]?.value ?? "";
+		if (currentValue !== desiredValue) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Returns tags that are not currently present on the note.
+ */
+function getMissingTags(existingTags: string[], desiredTags: string[]): string[] {
+	const existing = new Set(existingTags);
+	return desiredTags.filter((tag) => !existing.has(tag));
+}
+
+/**
+ * Determines whether a sync block should be reported as updated.
+ */
+function shouldCountAsUpdated(
+	needsFieldUpdate: boolean,
+	missingTagCount: number,
+	hasSyncPayloadChanged: boolean,
+	renameAction: RenameAction,
+): boolean {
+	return renameAction !== "none" || needsFieldUpdate || missingTagCount > 0 || hasSyncPayloadChanged;
+}
+
+/**
+ * Determines if deck/model was renamed between persisted and desired sync state.
+ */
+function determineRenameAction(
+	persistedEntry: PersistedSyncEntry | undefined,
+	currentModelName: string | undefined,
+	desiredDeckName: string,
+	desiredModelName: string,
+): RenameAction {
+	const modelRenamed = (persistedEntry?.modelName !== undefined && persistedEntry.modelName !== desiredModelName)
+		|| (currentModelName !== undefined && currentModelName !== desiredModelName);
+	if (modelRenamed) {
+		return "model";
+	}
+
+	const deckRenamed = persistedEntry?.deckName !== undefined && persistedEntry.deckName !== desiredDeckName;
+	if (deckRenamed) {
+		return "deck";
+	}
+
+	return "none";
+}
+
+/**
+ * Moves a note to a different deck.
+ */
+async function changeNoteDeck(client: AnkiConnectClient, noteId: number, deckName: string): Promise<void> {
+	await client.request<{notes: number[]; deck: string}, null>("changeDeck", {
+		notes: [noteId],
+		deck: deckName,
+	});
+}
+
+/**
+ * Recreates a note for model rename and removes the old note.
+ */
+async function recreateNoteForModelChange(
+	client: AnkiConnectClient,
+	noteId: number,
+	deckName: string,
+	modelName: string,
+	fields: Record<string, string>,
+	tags: string[],
+): Promise<number> {
+	const newNoteId = await client.request<{note: unknown}, number>("addNote", {
+		note: {
+			deckName,
+			modelName,
+			fields,
+			tags,
+			options: {
+				allowDuplicate: true,
+			},
+		},
+	});
+
+	await client.request<{notes: number[]}, null>("deleteNotes", {
+		notes: [noteId],
+	});
+
+	return newNoteId;
+}
+
+/**
+ * Retrieves note info for one note ID.
+ */
+async function getNoteInfo(client: AnkiConnectClient, noteId: number): Promise<AnkiNoteInfo | undefined> {
+	const notesInfo = await client.request<{notes: number[]}, AnkiNoteInfo[]>("notesInfo", {
+		notes: [noteId],
+	});
+
+	return notesInfo[0];
+}
+
+/**
+ * Builds deterministic hash input for sync-state change detection.
+ */
+function buildSyncContentHash(
+	deckName: string,
+	modelName: string,
+	tags: string[],
+	fields: Record<string, string>,
+	noteType: FlashcardBlockConfig["note_type"],
+): string {
+	const sortedFieldEntries = Object.entries(fields)
+		.sort(([left], [right]) => left.localeCompare(right));
+	const sortedTagList = [...tags].sort((left, right) => left.localeCompare(right));
+	const payload = {
+		deckName,
+		modelName,
+		fields: sortedFieldEntries,
+		tags: sortedTagList,
+		noteType: {
+			name: noteType.name,
+			fields: [...noteType.fields],
+			styling: noteType.styling,
+			cards: noteType.cards.map((card) => ({
+				name: card.name,
+				front_template: card.front_template,
+				back_template: card.back_template,
+			})),
+		},
+	};
+
+	return hashString(JSON.stringify(payload));
+}
+
+/**
  * Test-only exports for pure helper coverage.
  */
 export const __syncTestables = {
+	buildSyncContentHash,
 	buildAnkiCardTemplates,
 	buildAnkiMediaName,
 	buildSourceTag,
 	containsAnkiSoundToken,
 	createStableHash,
+	determineRenameAction,
 	extractFlashcardBlocks,
+	getMissingTags,
+	getFileSizeBytes,
+	hasFieldChanges,
 	isSupportedAudioPath,
 	normalizeAudioLinkValue,
 	resolveNoteTypeDefinition,
+	shouldCountAsUpdated,
+	toFieldTextResult,
+	validateFieldPayloadSizes,
 };

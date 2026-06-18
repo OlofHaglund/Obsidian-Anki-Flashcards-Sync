@@ -4,6 +4,8 @@ import {AnkiConnectClient} from "./anki/client";
 import {syncFlashcardsFromVault} from "./anki/sync";
 import {DEFAULT_SETTINGS, ObsidianAnkiPluginSettings, ObsidianAnkiSettingTab} from "./settings";
 
+const SYNC_STATE_STORAGE_KEY = "__syncState";
+
 /**
  * Main plugin entrypoint.
  * Keeps lifecycle concerns in one place and delegates feature logic to modules.
@@ -66,7 +68,22 @@ export default class ObsidianAnkiPlugin extends Plugin {
 	 * Persists settings and updates the Anki client endpoint in memory.
 	 */
 	async saveSettings(): Promise<void> {
-		await this.saveData(this.settings);
+		const rawData: unknown = await this.loadData();
+		const payload: Record<string, unknown> = {
+			...this.settings,
+		};
+		if (isRecord(rawData) && rawData[SYNC_STATE_STORAGE_KEY] !== undefined) {
+			payload[SYNC_STATE_STORAGE_KEY] = rawData[SYNC_STATE_STORAGE_KEY];
+		}
+
+		await this.saveData(payload);
 		this.ankiClient = new AnkiConnectClient(this.settings.ankiConnectUrl);
 	}
+}
+
+/**
+ * Guards plain object-like values.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

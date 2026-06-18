@@ -1,4 +1,4 @@
-# Obsidian Anki
+# Anki Flashcards Sync
 
 **NOTE:** This is an early version and released early to catch hiccups in the distribution flow. 
 
@@ -103,6 +103,10 @@ Audio: [[ca-va.wav]]
 - `[label](file.wav)`
 - direct vault path (`French/Sound Files/file.wav`)
 - existing Anki token (`[sound:file.wav]`) is left unchanged
+
+Limits:
+- Max single audio file upload: `100 MB`.
+- Oversized field values/payloads are skipped for safety.
 
 ## Sync behavior
 

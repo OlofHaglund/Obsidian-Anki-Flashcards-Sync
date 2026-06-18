@@ -26,7 +26,7 @@ export function registerFlashcardCodeBlockRenderer(plugin: Plugin): void {
 			}
 
 			const source = codeBlock.textContent ?? "";
-			const replacement = document.createElement("div");
+			const replacement = createDiv();
 			renderFlashcardBlock(plugin, source, replacement, ctx.sourcePath);
 
 			pre.replaceWith(replacement);
@@ -227,8 +227,7 @@ function renderTemplatePreviewCard(
 	styleSheet.replaceSync(`${DEFAULT_NOTE_STYLING}\n${styling}`);
 	shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, styleSheet];
 
-	const cardSurface = document.createElement("div");
-	cardSurface.className = "card";
+	const cardSurface = createDiv({cls: "card"});
 	shadowRoot.appendChild(cardSurface);
 
 	let currentSide: "front" | "back" = "front";
@@ -302,10 +301,11 @@ function hydrateAudioTokens(plugin: Plugin, cardSurface: HTMLElement, sourcePath
 	for (const placeholder of placeholders) {
 		const encodedPath = placeholder.getAttribute("data-audio-path") ?? "";
 		const audioPath = safeDecodeURIComponent(encodedPath);
-		const button = document.createElement("button");
-		button.type = "button";
-		button.className = "obsidian-anki-audio-button";
-		button.textContent = "Play audio";
+		const button = createEl("button", {
+			cls: "obsidian-anki-audio-button",
+			text: "Play audio",
+			type: "button",
+		});
 
 		button.addEventListener("click", () => {
 			const resolvedUrl = resolveAudioResourceUrl(plugin, audioPath, sourcePath);
@@ -328,7 +328,7 @@ function hydrateAudioTokens(plugin: Plugin, cardSurface: HTMLElement, sourcePath
 function sanitizeTemplateFragment(rawHtml: string): DocumentFragment {
 	const parser = new DOMParser();
 	const parsed = parser.parseFromString(rawHtml, "text/html");
-	const fragment = document.createDocumentFragment();
+	const fragment = createFragment();
 
 	const blockedTags = ["script", "iframe", "object", "embed", "link", "meta"];
 	for (const blockedTag of blockedTags) {

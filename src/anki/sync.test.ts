@@ -59,4 +59,134 @@ describe("sync helpers", () => {
 		expect(blocks[0]?.source).toContain("deck: A");
 		expect(blocks[1]?.source).toContain("deck: B");
 	});
+
+	it("detects field changes only when values differ", () => {
+		const unchanged = __syncTestables.hasFieldChanges({
+			fields: {
+				front: {value: "Bonjour"},
+				back: {value: "Hello"},
+			},
+			tags: [],
+		}, {
+			front: "Bonjour",
+			back: "Hello",
+		});
+
+		const changed = __syncTestables.hasFieldChanges({
+			fields: {
+				front: {value: "Bonjour"},
+				back: {value: "Hello"},
+			},
+			tags: [],
+		}, {
+			front: "Bonjour",
+			back: "Hi",
+		});
+
+		expect(unchanged).toBe(false);
+		expect(changed).toBe(true);
+	});
+
+	it("computes missing tags", () => {
+		const missing = __syncTestables.getMissingTags(
+			["obsidian", "synced"],
+			["obsidian", "synced", "new-tag"],
+		);
+		expect(missing).toEqual(["new-tag"]);
+	});
+
+	it("builds stable content hashes regardless of tag/field order", () => {
+		const noteType = {
+			name: "Basic",
+			fields: ["front", "back"],
+			styling: ".card {}",
+			cards: [{
+				name: "Card 1",
+				front_template: "{{front}}",
+				back_template: "{{FrontSide}}<hr id=answer>{{back}}",
+			}],
+		};
+
+		const first = __syncTestables.buildSyncContentHash(
+			"Deck",
+			"Basic",
+			["tag-b", "tag-a"],
+			{
+				back: "Hello",
+				front: "Bonjour",
+			},
+			noteType,
+		);
+		const second = __syncTestables.buildSyncContentHash(
+			"Deck",
+			"Basic",
+			["tag-a", "tag-b"],
+			{
+				front: "Bonjour",
+				back: "Hello",
+			},
+			noteType,
+		);
+		const changed = __syncTestables.buildSyncContentHash(
+			"Deck",
+			"Basic",
+			["tag-a", "tag-b"],
+			{
+				front: "Salut",
+				back: "Hello",
+			},
+			noteType,
+		);
+
+		expect(first).toBe(second);
+		expect(changed).not.toBe(first);
+	});
+
+	it("counts as updated when sync payload changed even without field or tag deltas", () => {
+		expect(__syncTestables.shouldCountAsUpdated(false, 0, true, "none")).toBe(true);
+		expect(__syncTestables.shouldCountAsUpdated(false, 0, false, "none")).toBe(false);
+		expect(__syncTestables.shouldCountAsUpdated(false, 0, false, "deck")).toBe(true);
+		expect(__syncTestables.shouldCountAsUpdated(false, 0, false, "model")).toBe(true);
+	});
+
+	it("detects deck/model rename actions from persisted state", () => {
+		const persisted = {
+			noteId: 42,
+			contentHash: "abc",
+			modelName: "Old model",
+			deckName: "Old deck",
+			updatedAt: 1,
+		};
+
+		expect(__syncTestables.determineRenameAction(persisted, "Old model", "New deck", "Old model")).toBe("deck");
+		expect(__syncTestables.determineRenameAction(persisted, "Old model", "Old deck", "New model")).toBe("model");
+		expect(__syncTestables.determineRenameAction(undefined, "Basic", "Deck", "Basic")).toBe("none");
+	});
+
+	it("rejects unsupported field value types", () => {
+		const unsupported = __syncTestables.toFieldTextResult(Symbol("audio"));
+		const supported = __syncTestables.toFieldTextResult(["a", 1, true]);
+
+		expect(unsupported.error).toContain("not supported");
+		expect(supported).toEqual({text: "a, 1, true"});
+	});
+
+	it("validates per-field and total payload byte limits", () => {
+		const fieldTooLarge = __syncTestables.validateFieldPayloadSizes(
+			{front: "abcde"},
+			{maxFieldBytes: 4, maxTotalBytes: 10},
+		);
+		const totalTooLarge = __syncTestables.validateFieldPayloadSizes(
+			{front: "abc", back: "def"},
+			{maxFieldBytes: 10, maxTotalBytes: 5},
+		);
+		const valid = __syncTestables.validateFieldPayloadSizes(
+			{front: "abc", back: "de"},
+			{maxFieldBytes: 10, maxTotalBytes: 10},
+		);
+
+		expect(fieldTooLarge[0]).toContain("front");
+		expect(totalTooLarge[0]).toContain("Total field payload");
+		expect(valid).toEqual([]);
+	});
 });
