@@ -2,7 +2,7 @@ import {Plugin, TFile} from "obsidian";
 import {AnkiConnectClient} from "./client";
 import {parseFlashcardBlock} from "../flashcards/parser";
 import {FlashcardBlockConfig, FlashcardTemplateConfig} from "../flashcards/types";
-import {ObsidianAnkiPluginSettings} from "../settings";
+import {ObsidianAnkiPluginSettings, SyncScope} from "../settings";
 
 const SYNC_STATE_STORAGE_KEY = "__syncState";
 const SYNC_STATE_VERSION = 1;
@@ -65,11 +65,14 @@ interface ModelActionCapabilities {
 
 /**
  * Discovers flashcards in the configured scope and syncs them to Anki.
+ * Pass `scopeOverride` to sync a different scope than the configured `settings.syncScope`
+ * (e.g. forcing "vault" for a "sync everything" command) without changing the user's setting.
  */
 export async function syncFlashcardsFromVault(
 	plugin: Plugin,
 	client: AnkiConnectClient,
 	settings: ObsidianAnkiPluginSettings,
+	scopeOverride?: SyncScope,
 ): Promise<SyncSummary> {
 	const summary: SyncSummary = {
 		created: 0,
@@ -79,7 +82,7 @@ export async function syncFlashcardsFromVault(
 		failures: [],
 	};
 
-	const files = getScopeFiles(plugin, settings);
+	const files = getScopeFiles(plugin, settings, scopeOverride);
 	const noteTypeRegistry = getAnkiNoteTypeRegistry(plugin);
 	const ensuredModels = new Set<string>();
 	const uploadedMedia = new Map<string, string>();
@@ -877,14 +880,16 @@ function buildAnkiCardTemplates(
 /**
  * Returns markdown files in sync scope.
  */
-function getScopeFiles(plugin: Plugin, settings: ObsidianAnkiPluginSettings): TFile[] {
-	if (settings.syncScope === "active-file") {
+function getScopeFiles(plugin: Plugin, settings: ObsidianAnkiPluginSettings, scopeOverride?: SyncScope): TFile[] {
+	const scope = scopeOverride ?? settings.syncScope;
+
+	if (scope === "active-file") {
 		const activeFile = plugin.app.workspace.getActiveFile();
 		return activeFile ? [activeFile] : [];
 	}
 
 	const markdownFiles = plugin.app.vault.getMarkdownFiles();
-	if (settings.syncScope === "folder") {
+	if (scope === "folder") {
 		const prefix = settings.syncFolder.trim();
 		if (!prefix) {
 			return [];

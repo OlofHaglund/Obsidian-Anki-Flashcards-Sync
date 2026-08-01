@@ -110,7 +110,9 @@ Limits:
 
 ## Sync behavior
 
-Command: `Sync flashcards to Anki`
+Commands:
+- `Sync flashcards to Anki` — syncs whatever scope is configured in **Settings → Sync scope** (active file, whole vault, or a specific folder).
+- `Sync all flashcards to Anki (whole vault)` — always syncs every note in the vault, regardless of the configured sync scope.
 
 Per flashcard block:
 - Resolves note type from `Anki/*.md`.

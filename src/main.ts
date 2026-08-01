@@ -2,7 +2,7 @@ import {Notice, Plugin} from "obsidian";
 import {registerFlashcardCodeBlockRenderer} from "./flashcards/renderer";
 import {AnkiConnectClient} from "./anki/client";
 import {syncFlashcardsFromVault} from "./anki/sync";
-import {DEFAULT_SETTINGS, ObsidianAnkiPluginSettings, ObsidianAnkiSettingTab} from "./settings";
+import {DEFAULT_SETTINGS, ObsidianAnkiPluginSettings, ObsidianAnkiSettingTab, SyncScope} from "./settings";
 
 const SYNC_STATE_STORAGE_KEY = "__syncState";
 
@@ -27,23 +27,35 @@ export default class ObsidianAnkiPlugin extends Plugin {
 		this.addCommand({
 			id: "sync-flashcards-to-anki",
 			name: "Sync flashcards to Anki",
-			callback: async () => {
-				try {
-					const result = await syncFlashcardsFromVault(this, this.ankiClient, this.settings);
-					const baseMessage = `Anki sync complete. Created: ${result.created}, Updated: ${result.updated}, Skipped: ${result.skipped}, Failed: ${result.failed}`;
-					if (result.failed === 0) {
-						new Notice(baseMessage);
-						return;
-					}
-
-					const firstFailure = result.failures[0] ?? "Unknown failure.";
-					new Notice(`${baseMessage}\nFirst error: ${firstFailure}`, 12000);
-				} catch (error: unknown) {
-					const message = error instanceof Error ? error.message : "Unknown sync failure.";
-					new Notice(`Anki sync failed: ${message}`);
-				}
-			},
+			callback: () => this.runSync(),
 		});
+
+		this.addCommand({
+			id: "sync-all-flashcards-to-anki",
+			name: "Sync all flashcards to Anki (whole vault)",
+			callback: () => this.runSync("vault"),
+		});
+	}
+
+	/**
+	 * Runs a sync and reports the result via Notice.
+	 * Pass `scopeOverride` to sync a scope other than the configured setting (e.g. "vault").
+	 */
+	private async runSync(scopeOverride?: SyncScope): Promise<void> {
+		try {
+			const result = await syncFlashcardsFromVault(this, this.ankiClient, this.settings, scopeOverride);
+			const baseMessage = `Anki sync complete. Created: ${result.created}, Updated: ${result.updated}, Skipped: ${result.skipped}, Failed: ${result.failed}`;
+			if (result.failed === 0) {
+				new Notice(baseMessage);
+				return;
+			}
+
+			const firstFailure = result.failures[0] ?? "Unknown failure.";
+			new Notice(`${baseMessage}\nFirst error: ${firstFailure}`, 12000);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown sync failure.";
+			new Notice(`Anki sync failed: ${message}`);
+		}
 	}
 
 	/**
