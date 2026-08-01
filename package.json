@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-sample-plugin",
 	"version": "0.0.5",
-	"description": "Pushes flashcards from notes to Anki. The flashcards are bashed on code blocks annotated with flashcard.",
+	"description": "Pushes flashcards from notes to Anki. The flashcards are based on code blocks annotated with flashcard.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
