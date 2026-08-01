@@ -8,6 +8,10 @@ export default tseslint.config(
 		languageOptions: {
 			globals: {
 				...globals.browser,
+				createEl: "readonly",
+				createDiv: "readonly",
+				createSpan: "readonly",
+				createFragment: "readonly",
 			},
 			parserOptions: {
 				projectService: {

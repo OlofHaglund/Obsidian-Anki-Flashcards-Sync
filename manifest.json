@@ -1,7 +1,7 @@
 {
 	"id": "anki-flashcards-sync",
 	"name": "Anki Flashcards Sync",
-	"version": "0.0.3",
+	"version": "0.0.4",
 	"minAppVersion": "1.12.4",
 	"description": "Pushes flashcards from notes to Anki. The flashcards are bashed on code blocks annotated with flashcard.",
 	"author": "Olof Haglund",
